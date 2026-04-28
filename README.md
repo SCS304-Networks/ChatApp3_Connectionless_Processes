@@ -1,11 +1,11 @@
 # One-on-One Chat Application
 
-A connectionless iterative client-server chat application that supports running across different machines with two startup modes:
+A connectionless concurrent client-server chat application that supports running across different machines with two startup modes:
 
 - **Tailscale mode** for remote machine-to-machine communication using MagicDNS
 - **LAN mode** for automatic server discovery using UDP broadcast fallback
 
-This version migrates the chat service to use connectionless UDP datagrams, moving away from TCP while preserving startup-time network detection and server discovery.
+This version migrates the chat service to a concurrent, connectionless UDP architecture using process forking, moving away from the previous iterative models while preserving startup-time network detection and server discovery.
 
 ## Features
 
@@ -59,7 +59,7 @@ When Tailscale is unavailable:
 ```text
 ChatApp3-Iterative-Connectionless/
 ├── server/
-│   ├── server.c             # Main iterative UDP server loop
+│   ├── server.c             # Main concurrent UDP server loop (forks child processes)
 │   ├── auth.c/h             # Authentication & account management
 │   ├── chat.c/h             # Messaging engine
 │   ├── utils.c/h            # Utility functions
@@ -210,20 +210,18 @@ The application now uses a pipe-delimited UDP text protocol for the actual chat 
 
 - **Chat Transport:** UDP (`SOCK_DGRAM`)
 - **Discovery Transport:** UDP (`SOCK_DGRAM`)
-- **Server Model:** Iterative, single-threaded
-- **Server Loop Design:** One main loop handles all UDP sockets (discovery and chat)
+- **Server Model:** Concurrent, process-based (using `fork()`)
+- **Server Loop Design:** Main process receives UDP packets and forks child processes to handle requests concurrently. File access is protected using `flock()`.
 - **Chat UDP Port:** `8080`
 - **UDP Discovery Port:** `8081`
 - **Buffer Size:** `1024`
 
 ## Important Notes
 
-1. The **chat service is now connectionless (UDP) and iterative**
+1. The **chat service is now connectionless (UDP) and concurrent**
 2. UDP is used for **both startup discovery and all subsequent chat communications**
-3. No extra threads are used
-4. The server uses a single-threaded loop to handle both:
-   - UDP discovery requests
-   - UDP chat messaging requests
+3. The server uses process-based concurrency (`fork()`) to spawn a child process for each incoming UDP chat request.
+4. Process-safe file synchronization is implemented using `flock()` to prevent data corruption when multiple children access text files simultaneously.
 5. Passwords are still stored in plain text for educational purposes
 6. Data is stored in flat text files under `data/`
 
