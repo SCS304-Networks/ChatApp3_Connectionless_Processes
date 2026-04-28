@@ -7,6 +7,7 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <termios.h>
 
 #include "ui.h"
 #include "network_client.h"
@@ -32,8 +33,9 @@ void handle_logout();
 void handle_inbox();
 void handle_chat(char partner[]);
 void send_chat_message(char partner[], char text[]);
-void fetch_and_display_messages(char partner[]);
+int fetch_and_display_messages(char partner[], int should_redraw);
 int input_available();
+void set_terminal_raw_mode(int enable);
 
 // Strips unwanted characters from input
 void sanitize_input(char buffer[]) {
@@ -75,8 +77,6 @@ int connect_to_server() {
         return -1;
     }
 
-    // Print connection success message
-    printf("[Network] Successfully connected to the server IP address %s\n", inet_ntoa(server_addr.sin_addr));
 
     // Set a 5-second receive timeout to prevent hanging if server doesn't respond
     struct timeval tv;
@@ -137,6 +137,7 @@ void handle_register() {
         ui_wait_for_enter();
         return;
     }
+    printf("[Network] Successfully connected to the server IP address %s\n", get_server_ip());
     
     snprintf(request, BUFFER_SIZE, "REGISTER|%s|%s\n", username, password);
     send_request(sock, request);
@@ -178,6 +179,7 @@ void handle_login() {
         ui_wait_for_enter();
         return;
     }
+    printf("[Network] Successfully connected to the server IP address %s\n", get_server_ip());
     
     snprintf(request, BUFFER_SIZE, "LOGIN|%s|%s\n", username, password);
     send_request(sock, request);
@@ -384,21 +386,40 @@ void handle_inbox() {
     handle_chat(partner);
 }
 
-// Fetches and displays messages for a conversation
-void fetch_and_display_messages(char partner[]) {
+// Enables or disables terminal raw mode for non-blocking character input
+void set_terminal_raw_mode(int enable) {
+    static struct termios oldt, newt;
+    if (enable) {
+        tcgetattr(STDIN_FILENO, &oldt);
+        newt = oldt;
+        // Disable canonical mode and echo
+        newt.c_lflag &= ~(ICANON | ECHO);
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    } else {
+        // Restore previous settings
+        tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    }
+}
+
+// Fetches messages for a conversation. Returns the total count of messages fetched.
+// If should_redraw is 1, it will print the messages to the screen.
+int fetch_and_display_messages(char partner[], int should_redraw) {
     char request[BUFFER_SIZE];
     char response[BUFFER_SIZE];
+    int msg_count = 0;
     
     int sock = connect_to_server();
     if (sock == -1) {
-        return;
+        return 0;
     }
     
     snprintf(request, BUFFER_SIZE, "FETCH|%s|%s\n", session_user, partner);
     send_request(sock, request);
     
-    // Display chat header
-    ui_display_chat_screen(session_user, partner);
+    // Display chat header if redrawing
+    if (should_redraw) {
+        ui_display_chat_screen(session_user, partner);
+    }
     
     // Receive and display messages until END
     while (1) {
@@ -409,26 +430,31 @@ void fetch_and_display_messages(char partner[]) {
         }
         
         if (strncmp(response, "DATA", 4) == 0) {
-            // Parse: DATA|id|sender|receiver|text|timestamp
-            char *fields[6];
-            char temp[BUFFER_SIZE];
-            strncpy(temp, response, BUFFER_SIZE - 1);
-            temp[BUFFER_SIZE - 1] = '\0';
+            msg_count++;
             
-            int field_count = 0;
-            char *token = strtok(temp, "|");
-            while (token && field_count < 6) {
-                fields[field_count++] = token;
-                token = strtok(NULL, "|");
-            }
-            
-            if (field_count >= 6) {
-                ui_display_message(fields[2], fields[5], fields[4]);
+            if (should_redraw) {
+                // Parse: DATA|id|sender|receiver|text|timestamp
+                char *fields[6];
+                char temp[BUFFER_SIZE];
+                strncpy(temp, response, BUFFER_SIZE - 1);
+                temp[BUFFER_SIZE - 1] = '\0';
+                
+                int field_count = 0;
+                char *token = strtok(temp, "|");
+                while (token && field_count < 6) {
+                    fields[field_count++] = token;
+                    token = strtok(NULL, "|");
+                }
+                
+                if (field_count >= 6) {
+                    ui_display_message(fields[2], fields[5], fields[4]);
+                }
             }
         }
     }
     
     close(sock);
+    return msg_count;
 }
 
 // Sends a chat message
@@ -455,39 +481,87 @@ void send_chat_message(char partner[], char text[]) {
 
 // Handles the active chat session
 void handle_chat(char partner[]) {
-    char input[MAX_MESSAGE];
+    char input[MAX_MESSAGE] = {0};
+    int input_len = 0;
+    int last_message_count = 0;
+    time_t last_fetch_time = time(NULL);
     
     // Initial message fetch and display
-    fetch_and_display_messages(partner);
-    printf("\n  Type /r to refresh, /q to quit.\n");
-    ui_display_chat_input_prompt();
+    last_message_count = fetch_and_display_messages(partner, 1);
+    printf("\n  [Auto-refresh active] Type /q to quit.\n");
+    printf("\n  You: ");
+    fflush(stdout);
+    
+    // Disable canonical mode so we can capture characters instantly
+    set_terminal_raw_mode(1);
     
     while (1) {
-        // Block until user types a full line
-        fgets(input, MAX_MESSAGE, stdin);
-        sanitize_input(input);
+        struct timeval tv = {1, 0}; // 1 second timeout
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
         
-        // Check for quit command
-        if (strcmp(input, "/q") == 0) {
-            break;
-        }
+        int res = select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv);
         
-        // Check for refresh command
-        if (strcmp(input, "/r") == 0) {
-            fetch_and_display_messages(partner);
-            printf("\n  Type /r to refresh, /q to quit.\n");
-            ui_display_chat_input_prompt();
-            continue;
-        }
+        if (res > 0) {
+            // User typed something
+            char c;
+            if (read(STDIN_FILENO, &c, 1) > 0) {
+                if (c == '\n' || c == '\r') {
+                    if (strcmp(input, "/q") == 0) {
+                        break;
+                    }
+                    if (input_len > 0) {
+                        send_chat_message(partner, input);
+                        input[0] = '\0';
+                        input_len = 0;
+                        
+                        // Immediately fetch and redraw after sending
+                        last_message_count = fetch_and_display_messages(partner, 1);
+                        printf("\n  [Auto-refresh active] Type /q to quit.\n");
+                        printf("\n  You: ");
+                        fflush(stdout);
+                        last_fetch_time = time(NULL);
+                    }
+                } else if (c == 127 || c == '\b') {
+                    // Handle backspace properly
+                    if (input_len > 0) {
+                        input_len--;
+                        input[input_len] = '\0';
+                        printf("\b \b"); // Erase character visually from terminal
+                        fflush(stdout);
+                    }
+                } else if (c >= 32 && c <= 126 && input_len < MAX_MESSAGE - 1) {
+                    // Printable character
+                    input[input_len++] = c;
+                    input[input_len] = '\0';
+                    putchar(c);
+                    fflush(stdout);
+                }
+            }
+        } 
         
-        // Send message if not empty
-        if (strlen(input) > 0) {
-            send_chat_message(partner, input);
-            fetch_and_display_messages(partner);
-            printf("\n  Type /r to refresh, /q to quit.\n");
-            ui_display_chat_input_prompt();
+        // Auto-refresh mechanism (poll every 2 seconds)
+        if (time(NULL) - last_fetch_time >= 2) {
+            last_fetch_time = time(NULL);
+            
+            // Quietly fetch the message count
+            int current_count = fetch_and_display_messages(partner, 0);
+            
+            if (current_count > last_message_count) {
+                // New messages arrived! Redraw the screen seamlessly
+                last_message_count = fetch_and_display_messages(partner, 1);
+                printf("\n  [Auto-refresh active] Type /q to quit.\n");
+                
+                // Restore the user's currently typed input
+                printf("\n  You: %s", input);
+                fflush(stdout);
+            }
         }
     }
+    
+    // Ensure we restore the terminal mode before returning
+    set_terminal_raw_mode(0);
 }
 
 // Displays the main menu and handles selection

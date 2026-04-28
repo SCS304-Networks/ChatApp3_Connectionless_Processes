@@ -73,43 +73,59 @@ static int get_tailscale_status(char *output, size_t output_size,
 }
 
 static int determine_lan_ip(char *ip_buffer, size_t ip_buffer_size) {
-  // Allow override via environment variable (useful for WSL2 where the
-  // detected IP is the internal VM address, not the Windows host IP)
-  const char *override_ip = getenv("SERVER_IP");
-  if (override_ip != NULL && strlen(override_ip) > 0) {
-    strncpy(ip_buffer, override_ip, ip_buffer_size - 1);
-    ip_buffer[ip_buffer_size - 1] = '\0';
-    return 1;
-  }
+    // Allow override via environment variable (useful for WSL2 where the
+    // detected IP is the internal VM address, not the Windows host IP)
+    const char *override_ip = getenv("SERVER_IP");
+    if (override_ip != NULL && strlen(override_ip) > 0) {
+        strncpy(ip_buffer, override_ip, ip_buffer_size - 1);
+        ip_buffer[ip_buffer_size - 1] = '\0';
+        return 1;
+    }
 
-  struct ifaddrs *ifaddr, *ifa;
-  char ip[INET_ADDRSTRLEN];
+    struct ifaddrs *ifaddr, *ifa;
+    char ip[INET_ADDRSTRLEN];
+    char fallback_ip[INET_ADDRSTRLEN] = "";
 
-  if (getifaddrs(&ifaddr) == -1) {
-    return 0;
-  }
+    if (getifaddrs(&ifaddr) == -1) {
+        return 0;
+    }
 
-  for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-    // Skip interfaces that are down or have no address
-    if (ifa->ifa_addr == NULL) continue;
-    if (!(ifa->ifa_flags & IFF_UP)) continue;
-    if (ifa->ifa_flags & IFF_LOOPBACK) continue;
-    if (ifa->ifa_addr->sa_family != AF_INET) continue;
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
+        if (!(ifa->ifa_flags & IFF_UP)) continue;
+        if (ifa->ifa_flags & IFF_LOOPBACK) continue;
+        if (ifa->ifa_addr->sa_family != AF_INET) continue;
 
-    struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
-    inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+        struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+        inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
 
-    // Skip Tailscale addresses
-    if (strncmp(ip, "100.", 4) == 0) continue;
+        // Skip Tailscale addresses — save as fallback only
+        if (strncmp(ip, "100.", 4) == 0) {
+            if (strlen(fallback_ip) == 0) {
+                strncpy(fallback_ip, ip, sizeof(fallback_ip) - 1);
+            }
+            continue;
+        }
 
-    strncpy(ip_buffer, ip, ip_buffer_size - 1);
-    ip_buffer[ip_buffer_size - 1] = '\0';
+        // Prefer 192.168.x.x or 10.x.x.x (real LAN)
+        if (strncmp(ip, "192.168.", 8) == 0 || strncmp(ip, "10.", 3) == 0) {
+            strncpy(ip_buffer, ip, ip_buffer_size - 1);
+            ip_buffer[ip_buffer_size - 1] = '\0';
+            freeifaddrs(ifaddr);
+            return 1;
+        }
+    }
+
+    // Fall back to any non-loopback IP if no preferred one found
+    if (strlen(fallback_ip) > 0) {
+        strncpy(ip_buffer, fallback_ip, ip_buffer_size - 1);
+        ip_buffer[ip_buffer_size - 1] = '\0';
+        freeifaddrs(ifaddr);
+        return 1;
+    }
+
     freeifaddrs(ifaddr);
-    return 1;
-  }
-
-  freeifaddrs(ifaddr);
-  return 0;
+    return 0;
 }
 
 static int setup_discovery_socket() {
