@@ -41,7 +41,8 @@ static int get_tailscale_status(char *output, size_t output_size, char *tailscal
     output[0] = '\0';
     tailscale_ip[0] = '\0';
 
-    pipe = popen("tailscale status", "r");
+    // Try native Linux command first, then Windows executable via WSL interop
+    pipe = popen("tailscale status 2>/dev/null || tailscale.exe status 2>/dev/null", "r");
     if (pipe == NULL) {
         return 0;
     }

@@ -48,7 +48,8 @@ static int get_tailscale_status(char *output, size_t output_size,
   output[0] = '\0';
   tailscale_ip[0] = '\0';
 
-  pipe = popen("tailscale status", "r");
+  // Try native Linux command first, then Windows executable via WSL interop
+  pipe = popen("tailscale status 2>/dev/null || tailscale.exe status 2>/dev/null", "r");
   if (pipe == NULL) {
     return 0;
   }
@@ -72,6 +73,15 @@ static int get_tailscale_status(char *output, size_t output_size,
 }
 
 static int determine_lan_ip(char *ip_buffer, size_t ip_buffer_size) {
+  // Allow override via environment variable (useful for WSL2 where the
+  // detected IP is the internal VM address, not the Windows host IP)
+  const char *override_ip = getenv("SERVER_IP");
+  if (override_ip != NULL && strlen(override_ip) > 0) {
+    strncpy(ip_buffer, override_ip, ip_buffer_size - 1);
+    ip_buffer[ip_buffer_size - 1] = '\0';
+    return 1;
+  }
+
   struct ifaddrs *ifaddr, *ifa;
   char ip[INET_ADDRSTRLEN];
 
