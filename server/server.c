@@ -54,7 +54,7 @@ void process_request(char buffer[], struct sockaddr_in *client_addr, socklen_t a
     
     // Log request with PID to demonstrate concurrency
     if (field_count >= 2 && strcmp(request_type, "FETCH") != 0 && strcmp(request_type, "CONTACTS") != 0) {
-        printf("[Process %d] [%s] %s\n", getpid(), request_type, fields[1]);
+        printf("[Child PID: %d] Processing [%s] from %s\n", getpid(), request_type, fields[1]);
     }
     
     if (strcmp(request_type, "REGISTER") == 0) {
@@ -224,9 +224,23 @@ int main() {
             }
             buffer[bytes] = '\0';
 
+            // Parse request type for logging (excluding spammy polling endpoints)
+            char req_type[32] = {0};
+            sscanf(buffer, "%31[^|]", req_type);
+            int should_log = (strcmp(req_type, "FETCH") != 0 && strcmp(req_type, "CONTACTS") != 0 && strlen(req_type) > 0);
+
+            if (should_log) {
+                printf("[Parent PID: %d] Received %s request, forking child...\n", getpid(), req_type);
+            }
+
             // Fork a child process to handle this request
             pid_t pid = fork();
-            if (pid == 0) {
+            if (pid > 0) {
+                // Parent: continues the loop immediately
+                if (should_log) {
+                    printf("[Parent PID: %d] Delegated %s request to Child PID: %d\n", getpid(), req_type, pid);
+                }
+            } else if (pid == 0) {
                 // Child process: handle the request, then exit
                 process_request(buffer, &client_addr, addr_len);
                 fflush(stdout);
@@ -235,7 +249,6 @@ int main() {
             } else if (pid < 0) {
                 printf("[!] Fork failed\n");
             }
-            // Parent: continues the loop immediately
         }
     }
     
