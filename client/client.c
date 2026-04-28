@@ -77,13 +77,6 @@ int connect_to_server() {
         return -1;
     }
 
-
-    // Set a 5-second receive timeout to prevent hanging if server doesn't respond
-    struct timeval tv;
-    tv.tv_sec = 5;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
     return sock;
 }
 
@@ -95,14 +88,30 @@ void send_request(int sock, char request[]) {
 
 // Receives a response from the server
 void receive_response(int sock, char buffer[]) {
-    int received = recv(sock, buffer, BUFFER_SIZE - 1, 0);
-    if (received > 0) {
-        buffer[received] = '\0';
-        char *nl = strchr(buffer, '\n');
-        if (nl) *nl = '\0';
-    } else {
-        buffer[0] = '\0';
+    fd_set read_fds;
+    struct timeval tv;
+    
+    FD_ZERO(&read_fds);
+    FD_SET(sock, &read_fds);
+    
+    // 5-second timeout for server response
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    
+    int result = select(sock + 1, &read_fds, NULL, NULL, &tv);
+    
+    if (result > 0) {
+        int received = recv(sock, buffer, BUFFER_SIZE - 1, 0);
+        if (received > 0) {
+            buffer[received] = '\0';
+            char *nl = strchr(buffer, '\n');
+            if (nl) *nl = '\0';
+            return;
+        }
     }
+    
+    // Timeout or error
+    buffer[0] = '\0';
 }
 
 // Checks if keyboard input is available (non-blocking)
